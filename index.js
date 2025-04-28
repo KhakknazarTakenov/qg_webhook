@@ -279,7 +279,6 @@ app.post(BASE_URL + "calculate_opportunity/:ID", async (req, res) => {
                 "message": "Необходимо предоставить dealId!"
             });
         }
-
         // Расшифровка URL вебхука
         const encryptedBxLink = process.env.BX_LINK;
         const key = process.env.CRYPTO_KEY;
@@ -293,7 +292,7 @@ app.post(BASE_URL + "calculate_opportunity/:ID", async (req, res) => {
             headers: { "Content-Type": "application/json" },
         });
         const productRows = await productRowsResponse.json();
-        if (!productRows.result.length) throw new Error('Товары не найдены');
+        if (!productRows.result.length) throw new Error('Products not found');
 
         // Подсчет суммы сделки (OPPORTUNITY)
         const opportunity = productRows.result.reduce((sum, row) => {
@@ -302,6 +301,18 @@ app.post(BASE_URL + "calculate_opportunity/:ID", async (req, res) => {
             const discount = parseFloat(row.DISCOUNT_SUM) || 0; // Скидка за единицу
             return sum + (price * quantity - discount * quantity); // Итоговая сумма с учетом скидки
         }, 0);
+
+        // Обновление поля UF_CRM_1744097917673
+        await fetch(`${baseUrl}crm.deal.update`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                id: dealId,
+                fields: {
+                    "OPPORTUNITY": opportunity
+                },
+            }),
+        });
 
         res.status(200).json({
             "status": true,
