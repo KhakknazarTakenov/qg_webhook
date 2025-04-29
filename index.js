@@ -111,6 +111,7 @@ app.post(BASE_URL + "bonus_deduct/:ID", async (req, res) => {
             });
             const product = (await productResponse.json()).result.product;
             const productId = row.PRODUCT_ID;
+            totalBonuses += row.DISCOUNT_SUM * row.QUANTITY;
             return {
                 id: product.id,
                 productId: productId,
@@ -136,6 +137,7 @@ app.post(BASE_URL + "bonus_deduct/:ID", async (req, res) => {
             return {
                 ...product,
                 discount: product.discount, // Начальная скидка
+                discountSum: product.discount * product.quantity,
                 maxDiscount: product.noBonuses ? 0 : product.totalItemPrice * maxDiscountPercent, // Максимальная скидка (по проценту)
                 maxPossibleDiscount: product.noBonuses ? 0 : product.totalItemPrice, // Ограничение по стоимости товара
                 maxDiscountPercent: maxDiscountPercent,
@@ -195,13 +197,10 @@ app.post(BASE_URL + "bonus_deduct/:ID", async (req, res) => {
             if (bonusesDistributedThisRound < 0.01) break;
         }
 
-        console.log(updatedRows);
-        console.log("#################");
-
         // Формируем обновленные товарные позиции
         const finalRows = updatedRows.map(product => {
             const discountPerUnit = Math.round(product.discount / product.quantity); // Округляем скидку за единицу
-            resultMessage.push(`${product.id} ${product.name} - ${discountPerUnit}\n`);
+            resultMessage.push(`${product.id} ${product.name} - ${discountPerUnit} тг\n`);
             return {
                 PRODUCT_ID: product.id,
                 PRICE: product.price - discountPerUnit, // Отнимаем скидку от цены за единицу
@@ -230,6 +229,7 @@ app.post(BASE_URL + "bonus_deduct/:ID", async (req, res) => {
         }
 
         console.log(finalRows);
+        console.log("#####")
 
         // Обновление товарных позиций
         await fetch(`${baseUrl}crm.deal.productrows.set`, {
@@ -272,6 +272,7 @@ app.post(BASE_URL + "bonus_deduct/:ID", async (req, res) => {
 app.post(BASE_URL + "calculate_opportunity/:ID", async (req, res) => {
     try {
         const dealId = req.body.dealId || req.params.ID || req.query.ID;
+        const providedOpportunity = parseFloat(req.body.opportunity) || parseFloat(req.query.opportunity) || parseFloat(req.params.opportunity) || null;
         if (!dealId) {
             return res.status(400).json({
                 "status": false,
@@ -279,6 +280,7 @@ app.post(BASE_URL + "calculate_opportunity/:ID", async (req, res) => {
                 "message": "Необходимо предоставить dealId!"
             });
         }
+
         // Расшифровка URL вебхука
         const encryptedBxLink = process.env.BX_LINK;
         const key = process.env.CRYPTO_KEY;
@@ -295,21 +297,32 @@ app.post(BASE_URL + "calculate_opportunity/:ID", async (req, res) => {
         if (!productRows.result.length) throw new Error('Products not found');
 
         // Подсчет суммы сделки (OPPORTUNITY)
-        const opportunity = productRows.result.reduce((sum, row) => {
-            const price = parseFloat(row.PRICE) || 0; // Цена за единицу
+        const calculatedOpportunity = productRows.result.reduce((sum, row) => {
+            const price = parseFloat(row.PRICE + row.DISCOUNT_SUM) || 0; // Цена за единицу
             const quantity = parseFloat(row.QUANTITY) || 0; // Количество
             const discount = parseFloat(row.DISCOUNT_SUM) || 0; // Скидка за единицу
             return sum + (price * quantity - discount * quantity); // Итоговая сумма с учетом скидки
         }, 0);
 
-        // Обновление поля UF_CRM_1744097917673
+        // Проверка, совпадает ли рассчитанная сумма с предоставленной
+        if (providedOpportunity !== null && calculatedOpportunity == providedOpportunity) {
+            console.log(`Deal ${dealId} - no updates`)
+            return res.status(200).json({
+                "status": true,
+                "status_msg": "success",
+                "message": "Сумма сделки совпадает с предоставленной, обновление не требуется",
+                "opportunity": calculatedOpportunity,
+            });
+        }
+
+        // Обновление поля OPPORTUNITY
         await fetch(`${baseUrl}crm.deal.update`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 id: dealId,
                 fields: {
-                    "OPPORTUNITY": opportunity
+                    "OPPORTUNITY": calculatedOpportunity
                 },
             }),
         });
@@ -318,7 +331,7 @@ app.post(BASE_URL + "calculate_opportunity/:ID", async (req, res) => {
             "status": true,
             "status_msg": "success",
             "message": "Сумма сделки успешно подсчитана",
-            "opportunity": opportunity,
+            "opportunity": calculatedOpportunity,
         });
     } catch (error) {
         logMessage(LOG_TYPES.E, BASE_URL + "/calculate_opportunity", error);
