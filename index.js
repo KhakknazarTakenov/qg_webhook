@@ -196,13 +196,15 @@ app.post(BASE_URL + "bonus_deduct/:ID", async (req, res) => {
             if (bonusesDistributedThisRound < 0.01) break;
         }
 
+        console.log("######")
+        console.log(updatedRows)
+        console.log("######")
         // Формируем обновленные товарные позиции, заменяя только те, к которым применялись бонусы
         const finalRows = products.map(product => {
-            // Проверяем, был ли товар в eligibleProducts (т.е. применялись ли к нему бонусы)
             const updatedProduct = updatedRows.find(up => up.productId === product.productId);
             if (updatedProduct) {
                 // Для товаров, к которым применялись бонусы
-                const discountPerUnit = Math.round(updatedProduct.discount / updatedProduct.quantity); // Округляем скидку за единицу
+                const discountPerUnit = Math.round(updatedProduct.discount / updatedProduct.quantity); // Округляем до целого
                 discountPerUnit > 0 ? resultMessage.push(`${updatedProduct.name} - ${discountPerUnit} тг\n`) : null;
                 return {
                     PRODUCT_ID: updatedProduct.id,
@@ -213,38 +215,78 @@ app.post(BASE_URL + "bonus_deduct/:ID", async (req, res) => {
                 };
             } else {
                 // Для товаров, которые не участвовали в распределении бонусов (сохраняем исходные данные)
+                const discountPerUnit = Math.round(product.discount || 0); // Округляем исходную скидку
                 return {
                     PRODUCT_ID: product.id,
-                    PRICE: product.price - (product.discount || 0), // Сохраняем исходную скидку, если была
+                    PRICE: product.price - discountPerUnit, // Сохраняем исходную скидку, если была
                     QUANTITY: product.quantity,
                     DISCOUNT_TYPE_ID: 1,
-                    DISCOUNT_SUM: product.discount || 0, // Сохраняем исходную скидку
+                    DISCOUNT_SUM: discountPerUnit, // Сохраняем исходную скидку
                 };
             }
         });
 
-        // Корректировка общей суммы скидок, чтобы она точно соответствовала totalBonuses
+        console.log("####### PRE PRE FINAL ROWS #######");
+        console.log(finalRows);
+        console.log("##################################");
+
+// Корректировка общей суммы скидок, чтобы она точно соответствовала totalBonuses
         let totalDiscountSum = finalRows.reduce((sum, row) => sum + (row.DISCOUNT_SUM * row.QUANTITY), 0);
         if (totalDiscountSum !== totalBonuses && finalRows.length > 0) {
-            // Находим последний товар, к которому применялись бонусы
-            const lastEligibleRow = finalRows.find(row => updatedRows.some(up => up.productId === row.PRODUCT_ID));
-            if (lastEligibleRow) {
-                const diff = totalBonuses - totalDiscountSum;
-                const additionalDiscount = Math.round(diff / lastEligibleRow.QUANTITY); // Сколько нужно добавить/убрать за единицу
-                lastEligibleRow.DISCOUNT_SUM += additionalDiscount; // Корректируем скидку
-                lastEligibleRow.PRICE -= additionalDiscount; // Корректируем цену соответственно
+            // Пропорционально корректируем скидки, если сумма не совпадает с totalBonuses
+            if (totalDiscountSum > totalBonuses) {
+                const correctionFactor = totalBonuses / totalDiscountSum;
+                finalRows.forEach(row => {
+                    if (updatedRows.some(up => up.productId === row.PRODUCT_ID)) { // Корректируем только товары с бонусами
+                        row.DISCOUNT_SUM = Math.round(row.DISCOUNT_SUM * correctionFactor); // Округляем до целого
+                        row.PRICE = updatedRows.find(up => up.productId === row.PRODUCT_ID).price - row.DISCOUNT_SUM; // Пересчитываем цену
+                        if (row.DISCOUNT_SUM < 0) {
+                            row.DISCOUNT_SUM = 0; // Не допускаем отрицательных скидок
+                            row.PRICE = updatedRows.find(up => up.productId === row.PRODUCT_ID).price; // Восстанавливаем цену
+                        }
+                    }
+                });
+            } else {
+                // Если сумма меньше totalBonuses, увеличиваем скидки пропорционально
+                const correctionFactor = totalBonuses / totalDiscountSum;
+                finalRows.forEach(row => {
+                    if (updatedRows.some(up => up.productId === row.PRODUCT_ID)) {
+                        row.DISCOUNT_SUM = Math.round(row.DISCOUNT_SUM * correctionFactor); // Округляем до целого
+                        row.PRICE = updatedRows.find(up => up.productId === row.PRODUCT_ID).price - row.DISCOUNT_SUM; // Пересчитываем цену
+                        if (row.DISCOUNT_SUM < 0) {
+                            row.DISCOUNT_SUM = 0;
+                            row.PRICE = updatedRows.find(up => up.productId === row.PRODUCT_ID).price;
+                        }
+                    }
+                });
+            }
 
-                // Проверяем итоговую сумму после корректировки
-                totalDiscountSum = finalRows.reduce((sum, row) => sum + (row.DISCOUNT_SUM * row.QUANTITY), 0);
-                if (totalDiscountSum !== totalBonuses) {
-                    const finalDiff = totalBonuses - totalDiscountSum;
-                    lastEligibleRow.DISCOUNT_SUM += Math.sign(finalDiff); // Добавляем или вычитаем единицу
-                    lastEligibleRow.PRICE -= Math.sign(finalDiff); // Корректируем цену
+            console.log("####### PRE FINAL ROWS #######");
+            console.log(finalRows);
+            console.log("##############################");
+
+            // Финальная проверка и корректировка
+            totalDiscountSum = finalRows.reduce((sum, row) => sum + (row.DISCOUNT_SUM * row.QUANTITY), 0);
+            if (totalDiscountSum !== totalBonuses) {
+                const diff = totalBonuses - totalDiscountSum;
+                const lastEligibleRow = finalRows.find(row => updatedRows.some(up => up.productId === row.PRODUCT_ID));
+                if (lastEligibleRow) {
+                    const additionalDiscount = Math.round(diff / lastEligibleRow.QUANTITY); // Округляем корректировку
+                    lastEligibleRow.DISCOUNT_SUM += additionalDiscount;
+                    lastEligibleRow.PRICE = updatedRows.find(up => up.productId === lastEligibleRow.PRODUCT_ID).price - lastEligibleRow.DISCOUNT_SUM;
+                    if (lastEligibleRow.DISCOUNT_SUM < 0) {
+                        lastEligibleRow.DISCOUNT_SUM = 0;
+                        lastEligibleRow.PRICE = updatedRows.find(up => up.productId === lastEligibleRow.PRODUCT_ID).price;
+                    }
                 }
             }
         }
 
-        // Обновление товарных позиций
+        console.log("###### FINAL ROWS #######");
+        console.log(finalRows);
+        console.log("#########################");
+
+// Обновление товарных позиций
         await fetch(`${baseUrl}crm.deal.productrows.set`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -254,7 +296,7 @@ app.post(BASE_URL + "bonus_deduct/:ID", async (req, res) => {
             }),
         });
 
-        // Обновление поля UF_CRM_1744097917673
+// Обновление поля UF_CRM_1744097917673
         await fetch(`${baseUrl}crm.deal.update`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
